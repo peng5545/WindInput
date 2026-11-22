@@ -3962,7 +3962,10 @@ STDAPI CTextService::OnChange(REFGUID rguid)
 
         // End composition when keyboard becomes disabled
         if (bDisabled)
+        {
+            NotifyCandidatesVisibilityChanged(FALSE);
             EndComposition();
+        }
 
         // Update language bar to show disabled state
         if (_pLangBarItemButton != nullptr)
@@ -8387,6 +8390,10 @@ void CTextService::_DropRecoverLeftover(TfEditCookie ec, ITfContext* pContext)
 
 void CTextService::ResetComposingState(BOOL keepPairState)
 {
+    // 非按键路径（Ctrl+Space / CONVERSION 切中英、点击语言栏、push 清组合/上屏）均经此收口：
+    // 同步发出 EndUIElement 并卸载候选热键。漏掉它会导致 Chrome Omnibox 以为输入法候选窗
+    // 仍处于打开状态，从而在切英文后永久抑制地址栏联想下拉框。
+    NotifyCandidatesVisibilityChanged(FALSE);
     if (_pKeyEventSink != nullptr)
     {
         _pKeyEventSink->ResetComposingState(keepPairState);
