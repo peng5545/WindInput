@@ -27,6 +27,19 @@
 
 ---
 
+## 2026-11-21 · 拼写纠错：非首音节纠错不再被短前缀同文候选遮蔽
+
+- 合入：待填（push 前回填）；范围：全拼方案（含临时拼音），拼写纠错开启
+- 变化：`buyogn`（配置 `ogn=ong` 或开启 `gn_ng`）前：编码栏 `bu'yo'gn`，`bu'y` 混合简拼回退（消费 3 字节）先占了「不用」导致 6 字节纠错候选被去重丢弃，首选「不哟」、「不用」排第 3 且无 `*` → 后：编码栏 `bu'yogn`，首选 `*不用`（消费整串 6 字节），无重复同文候选。同类受影响的还有 `dagogn`（打工）、`chenggogn`（成功）、`gaoxign`（高兴）等错在非首音节的词；`konglon` 编码栏由 `kong'lo'n` 修正为 `kong'lon`；首字纠错后接声母/残码（如 `nonm`、`gognz`）由仅出单字（`*农`）改为可召回词组（`*农民`、`*工作`，编码栏 `non'm`）；打字途中的同长度前缀补全（如 `buzhon` 6 字节）行为不变
+- 触发条件：开启拼写纠错且输入错在非首音节、末尾半截或首字纠错后接声母/残码
+- 回退旧行为：无（缺陷修复）
+- 钉住的测试：`wind-candidate/src/candidate.rs::corrected_tests::longer_corrected_survives_shorter_plain`、
+  `wind-engine/src/pinyin/mod.rs::tests::correction_longer_consumption_beats_shorter_abbrev_fallback`、
+  `wind-engine/src/pinyin/mod.rs::tests::correction_does_not_override_same_length_prefix_completion`、
+  `wind-engine/src/pinyin/mod.rs::tests::correction_trailing_on_ong_splits_preedit_and_dedups`、
+  `wind-engine/src/pinyin/mod.rs::tests::correction_head_with_trailing_initial_recalls_phrase`
+- 来源：内部（拼写纠错缺陷修复）
+
 ## 2026-11-20 · 直接辅助码：退格重打不再冒出连打时没有的生僻字（0.133）
 
 - 合入：待填（push 前回填）；范围：双拼方案，`direct` 开（连续模式与逃生口下的串尾直接辅助都受影响），

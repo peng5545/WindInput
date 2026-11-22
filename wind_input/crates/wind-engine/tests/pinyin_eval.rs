@@ -857,7 +857,7 @@ const PAGE: usize = 7;
 /// 为什么可以不跑协调器：见模块文档「两套位次」一节（对拍逐条一致）。
 fn ui_candidates(mgr: &EngineManager, input: &str) -> Vec<wind_candidate::Candidate> {
     let mut c = mgr.convert_with("pinyin", input, UI_LIMIT).candidates;
-    wind_candidate::drop_corrected_duplicates(&mut c);
+    wind_candidate::drop_corrected_duplicates(&mut c, input.len());
     c.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, input));
     let mut seen = std::collections::HashSet::new();
     c.retain(|x| seen.insert(x.text.clone()));
@@ -1863,7 +1863,7 @@ fn pinyin_eval_shuangpin() {
             .convert_with_opts("shuangpin", keys, UI_LIMIT, opts)
             .candidates;
         let engine = c.iter().take(TOP_N).position(|x| x.text == text);
-        wind_candidate::drop_corrected_duplicates(&mut c);
+        wind_candidate::drop_corrected_duplicates(&mut c, keys.len());
         c.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, keys));
         let mut seen = std::collections::HashSet::new();
         c.retain(|x| seen.insert(x.text.clone()));

@@ -308,7 +308,7 @@ impl Route<'_> {
 
 /// 界面序（同 `pinyin_eval::ui_candidates`）。
 fn ui_order(mut c: Vec<Candidate>, input: &str) -> Vec<Candidate> {
-    wind_candidate::drop_corrected_duplicates(&mut c);
+    wind_candidate::drop_corrected_duplicates(&mut c, input.len());
     c.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, input));
     let mut seen = HashSet::new();
     c.retain(|x| seen.insert(x.text.clone()));
