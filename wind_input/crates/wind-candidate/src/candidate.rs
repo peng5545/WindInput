@@ -778,29 +778,18 @@ pub fn effective_consumed(c: &Candidate, input_len: usize) -> usize {
     }
 }
 
-/// 同一文字既有经纠错（[`Candidate::is_corrected`]）又有非纠错的候选时：
-/// 仅当非纠错候选的有效消费长度不短于纠错候选（`plain >= corr`）时，去掉纠错那条，
-/// 非纠错那条留在原位；若纠错候选消费严格更长（如 `bu'y` 3 字节 vs `bu'yogn` 6 字节），
-/// 保留纠错那条，避免短前缀遮蔽长纠错。
-pub fn drop_corrected_duplicates(cands: &mut Vec<Candidate>, input_len: usize) {
+/// 同一文字既有经纠错（[`Candidate::is_corrected`]）又有非纠错的候选时，去掉纠错那条，
+/// 非纠错那条留在原位。
+pub fn drop_corrected_duplicates(cands: &mut Vec<Candidate>) {
     if !cands.iter().any(|c| c.is_corrected) {
         return;
     }
-    let mut plain_max: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for c in cands.iter().filter(|c| !c.is_corrected) {
-        let consumed = effective_consumed(c, input_len);
-        plain_max
-            .entry(c.text.clone())
-            .and_modify(|m| *m = (*m).max(consumed))
-            .or_insert(consumed);
-    }
-    cands.retain(|c| {
-        if !c.is_corrected {
-            return true;
-        }
-        let corr = effective_consumed(c, input_len);
-        plain_max.get(&c.text).is_none_or(|&plain| corr > plain)
-    });
+    let plain: std::collections::HashSet<String> = cands
+        .iter()
+        .filter(|c| !c.is_corrected)
+        .map(|c| c.text.clone())
+        .collect();
+    cands.retain(|c| !c.is_corrected || !plain.contains(&c.text));
 }
 
 /// 纠错候选不占首选（设计 D6）：首条经纠错（或误读召回，见 [`Candidate::is_low_confidence`]）、
@@ -1801,28 +1790,9 @@ mod corrected_tests {
     #[test]
     fn duplicate_keeps_uncorrected() {
         let mut cs = vec![c("中", true), c("种", true), c("中", false), c("众", false)];
-        drop_corrected_duplicates(&mut cs, 5);
+        drop_corrected_duplicates(&mut cs);
         assert_eq!(texts(&cs), ["种", "中", "众"]);
         assert!(!cs[1].is_corrected);
-    }
-
-    #[test]
-    fn longer_corrected_survives_shorter_plain() {
-        let mut short_plain = c("不用", false);
-        short_plain.is_abbrev = true;
-        short_plain.consumed_length = 3;
-        let mut long_corr = c("不用", true);
-        long_corr.consumed_length = 6;
-        let mut same_len_plain = c("中工", false);
-        same_len_plain.consumed_length = 0; // 0 表示消费整串（6）
-        let mut same_len_corr = c("中工", true);
-        same_len_corr.consumed_length = 6;
-        let mut cs = vec![short_plain, long_corr, same_len_plain, same_len_corr];
-        drop_corrected_duplicates(&mut cs, 6);
-        assert_eq!(texts(&cs), ["不用", "不用", "中工"]);
-        assert!(!cs[0].is_corrected);
-        assert!(cs[1].is_corrected);
-        assert!(!cs[2].is_corrected);
     }
 
     #[test]

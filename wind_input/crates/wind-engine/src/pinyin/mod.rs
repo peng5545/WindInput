@@ -1566,13 +1566,10 @@ impl PinyinEngine {
                 render_preedit(completed, boundary, partial)
             }));
         }
-        // 纠错召回的整串候选：主切分不走纠错边，`completed` 覆盖不到它（`gognping` → 空串、
-        // `konglon` → `konglo`），按所打码切分显示成 `gogn'ping` / `kong'lon`。
-        // 末尾半截（`konglon` 的 `lon` 对 `long`）按 D10 不标 `is_corrected`，但同样经纠错边召回
-        // 并带有 `fuzzy_typed_boundary`，故一并认出；关纠错时这一支仍结构上不可达。
-        let from_correction = c.is_corrected
-            || (!self.fuzzy_config.correction.is_empty() && c.meta.fuzzy_typed_boundary != 0);
-        if from_correction && boundary != 0 && c.code == raw_input && !c.is_abbrev && !c.is_sentence
+        // 纠错召回的整串候选：主切分不走纠错边，`completed` 覆盖不到它（`gognping` → 空串），
+        // 按所打码切分显示成 `gogn'ping`。
+        // 只认纠错候选：关纠错时这一支结构上不可达。
+        if c.is_corrected && boundary != 0 && c.code == raw_input && !c.is_abbrev && !c.is_sentence
         {
             return Some(cache.get((3, boundary, raw_input.len()), || {
                 render_preedit(raw_input, boundary, "")
@@ -2607,73 +2604,6 @@ impl PinyinEngine {
     /// 换位纠错召回：同 [`Self::lookup_with_fuzzy`]，但变体展开走纠错边。
     fn lookup_corrected(&self, code: &str, syllables: &[String]) -> Vec<LookupHit> {
         self.lookup_with_fuzzy_in(code, syllables, false, &self.fuzzy_config, true)
-    }
-
-    /// 纠错前段 + 末尾残码/声母的前缀补全（如 `nonm` → `nongm` → 农民、`gognz` → `gongz` → 工作）。
-    ///
-    /// 主切分不走纠错边、混合简拼也不认纠错音节，`nonm` 此前只能由 `lookup_corrected("non")`
-    /// 查出单字「*农」。这里把 `head` 经纠错展开成正确变体码 `variant`，拼上末尾 `tail` 后
-    /// 调词典前缀查询（要求 `variant.len()` 处为音节边界，且前段边界与纠错形态吻合），
-    /// 返回 `(LookupHit, completion_extra_syllables)`。
-    fn lookup_corrected_prefix(
-        &self,
-        head: &str,
-        head_syls: &[String],
-        tail: &str,
-        limit: usize,
-        syllable_cap: u32,
-    ) -> Vec<(LookupHit, u8)> {
-        let mut results: Vec<(LookupHit, u8)> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let fuzzy = self.fuzzy_codes(head, head_syls, false, &self.fuzzy_config, true, &|v| {
-            self.dict.has_longer_code(v)
-        });
-        for (variant, shapes) in fuzzy {
-            let prefix_query = format!("{variant}{tail}");
-            let vlen = variant.len();
-            for h in self.dict.search_prefix_with_boundary_syllable_capped(
-                &prefix_query,
-                limit,
-                syllable_cap,
-                vlen,
-            ) {
-                if h.code.len() <= vlen {
-                    continue;
-                }
-                let head_mask = if h.boundary != 0 && vlen < 64 {
-                    h.boundary & ((1u64 << vlen) - 1)
-                } else {
-                    h.boundary
-                };
-                let Some((edits, head_typed)) = fuzzy_shape_edits(&shapes, head_mask) else {
-                    continue;
-                };
-                if !seen.insert(h.text.clone()) {
-                    continue;
-                }
-                let typed_boundary = if head_typed != 0 && head.len() < 64 {
-                    head_typed | (1u64 << head.len())
-                } else {
-                    head_typed
-                };
-                let total_syls = effective_boundary(&h.code, h.boundary, &self.trie).count_ones();
-                let distance = total_syls.saturating_sub(head_syls.len() as u32).max(1);
-                let extra = distance.saturating_sub(1).min(u8::MAX as u32) as u8;
-                results.push((
-                    LookupHit {
-                        text: h.text,
-                        weight: fuzzy_penalized(completion_penalized(h.weight, distance), edits),
-                        order: h.order,
-                        is_fuzzy: edits > 0,
-                        boundary: 0,
-                        typed_boundary,
-                        dict: Some((h.code, h.boundary)),
-                    },
-                    extra,
-                ));
-            }
-        }
-        results
     }
 
     /// [`Self::lookup_with_fuzzy`] 的本体，模糊配置由调用方给：全拼降级支路传去掉双拼同键
@@ -5645,10 +5575,7 @@ impl Engine for PinyinEngine {
 
         // 换位纠错召回：主切分不走纠错边（见 `Dag::maximum_match`），纠错词在这里按走纠错边的
         // 切分另查——整串与含纠错音节的各级前缀，同 step 1 / step 3 的查法。放在全部召回之后：
-        // 同文时按覆盖长度决胜——已有同文非纠错候选的有效消费长度不短于纠错码时（如打字途中的
-        // 前缀补全 `buyon` 5 字节 vs 5 字节）保留原非纠错候选；若已有同文候选只消费了更短前缀
-        // （如混合简拼回退 `bu'y` 3 字节 vs 纠错 `bu'yogn` 6 字节），则允许长消费纠错候选入队，
-        // 暂不删原短候选（小窗口无纠错配额时保底），截断后再清掉被幸存长纠错压过的短候选。
+        // `push_unique` 同文先到者占位，同一文字有非纠错来源时留非纠错那条。
         // 经本步新增的文字：截断时只占非纠错候选用剩的名额（见下方截断处）。不能只看
         // `is_corrected`——末尾打字途中的半截（`zhon`）对齐判作前缀、不标纠错。
         let mut correction_added: std::collections::HashSet<String> = Default::default();
@@ -5658,103 +5585,28 @@ impl Engine for PinyinEngine {
                 .iter()
                 .position(|s| trie.is_correction_spelling(s));
             if let Some(first) = first_corr {
-                let est_consumed = |c: &Candidate| -> usize {
-                    if c.is_abbrev && c.consumed_length != 0 {
-                        c.consumed_length
-                    } else if !c.code.is_empty() && query.starts_with(&c.code) {
-                        c.code.len()
-                    } else {
-                        query.len()
-                    }
-                };
                 for end in (first + 1)..=corr_syls.len().min(6) {
                     let code: String = corr_syls[..end].concat();
                     for h in self.lookup_corrected(&code, &corr_syls[..end]) {
-                        if h.text.is_empty()
-                            || opts.admit.as_deref().is_some_and(|f| !f(&h.text))
-                        {
-                            continue;
+                        let learn = h.dict.clone();
+                        let typed = h.typed_boundary;
+                        let before = candidates.len();
+                        push_unique(
+                            &mut candidates,
+                            h.text,
+                            code.clone(),
+                            h.weight,
+                            h.order,
+                            h.is_fuzzy,
+                            false,
+                            h.boundary,
+                            false,
+                        );
+                        if candidates.len() > before {
+                            candidates[before].meta.learn_code = learn;
+                            candidates[before].meta.fuzzy_typed_boundary = typed;
+                            correction_added.insert(candidates[before].text.clone());
                         }
-                        if candidates
-                            .iter()
-                            .filter(|c| c.text == h.text)
-                            .map(est_consumed)
-                            .max()
-                            .is_some_and(|m| m >= code.len())
-                        {
-                            continue;
-                        }
-                        let is_partial = code.len() < query.len() && query.starts_with(&code);
-                        correction_added.insert(h.text.clone());
-                        candidates.push(Candidate {
-                            text: h.text,
-                            code: code.clone(),
-                            weight: h.weight,
-                            natural_order: h.order,
-                            source: CandidateSource::Pinyin,
-                            is_fuzzy: h.is_fuzzy,
-                            is_prefix: false,
-                            is_partial,
-                            boundary: h.boundary,
-                            is_promoted_completion: false,
-                            meta: wind_candidate::CandidateMeta {
-                                learn_code: h.dict,
-                                fuzzy_typed_boundary: h.typed_boundary,
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        });
-                    }
-                }
-                // 纠错前段后还跟着未成音节的尾巴（声母/残码，如 `nonm`、`gognz`、`nonmi`）：
-                // 按纠错变体 + 尾巴查词典前缀补全，使首字/前段拼错时仍可简拼或半拼出词组。
-                let corr_len: usize = corr_syls.iter().map(String::len).sum();
-                if corr_len < query.len() {
-                    let head = &query[..corr_len];
-                    let tail = &query[corr_len..];
-                    let corr_cap = completion_syllable_cap(
-                        (corr_syls.len() + 1) as u32,
-                        self.config.completion_min_syllables,
-                        self.config.completion_max_extra_syllables,
-                    );
-                    let corr_limit = max_candidates.clamp(16, 64);
-                    for (h, extra) in
-                        self.lookup_corrected_prefix(head, &corr_syls, tail, corr_limit, corr_cap)
-                    {
-                        if h.text.is_empty()
-                            || opts.admit.as_deref().is_some_and(|f| !f(&h.text))
-                        {
-                            continue;
-                        }
-                        if candidates
-                            .iter()
-                            .filter(|c| c.text == h.text)
-                            .map(est_consumed)
-                            .max()
-                            .is_some_and(|m| m >= query.len())
-                        {
-                            continue;
-                        }
-                        correction_added.insert(h.text.clone());
-                        candidates.push(Candidate {
-                            text: h.text,
-                            code: query.to_string(),
-                            weight: h.weight,
-                            natural_order: h.order,
-                            source: CandidateSource::Pinyin,
-                            is_fuzzy: h.is_fuzzy,
-                            is_prefix: true,
-                            is_partial: false,
-                            boundary: h.boundary,
-                            is_promoted_completion: true,
-                            completion_extra_syllables: extra,
-                            meta: wind_candidate::CandidateMeta {
-                                learn_code: h.dict,
-                                fuzzy_typed_boundary: h.typed_boundary,
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        });
                     }
                 }
             }
@@ -5914,7 +5766,7 @@ impl Engine for PinyinEngine {
         let correction_on = !self.fuzzy_config.correction.is_empty();
         if correction_on {
             self.fill_pinyin_hints(&mut candidates, query, raw_input, sp_result.as_ref());
-            wind_candidate::drop_corrected_duplicates(&mut candidates, raw_input.len());
+            wind_candidate::drop_corrected_duplicates(&mut candidates);
         }
         candidates.sort_by(engine_order);
         // 纠错召回步新增的也算：末尾半截（`zhon`）对齐判作前缀、不标纠错。
@@ -5926,30 +5778,6 @@ impl Engine for PinyinEngine {
         // `abbrev_quota = false`：调用方声明了不重排（见 `ConvertOptions::no_abbrev_quota`），
         // 简拼补位在那边是净损失；纠错保底保持有序，照做。
         truncate_with_quotas(&mut candidates, max_candidates, abbrev_quota, &is_corr);
-        // 截断后收口：长消费纠错候选（如 `bu'yogn` 6 字节 `*不用`、以及末尾半截未标 `is_corrected`
-        // 的 `kong'lon` 7 字节「恐龙」）活过截断后，清掉同文但消费更短的候选（如 `bu'y` / `kong'l`），
-        // 避免临拼等不二次按 text 去重的通路出现重复候选；若小窗口（如混输 `max_candidates < 10`）下
-        // 长消费纠错候选未活过截断，短候选仍保底留存。
-        if correction_on && !correction_added.is_empty() {
-            let mut max_by_text: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
-            for c in &candidates {
-                if c.is_corrected || correction_added.contains(&c.text) {
-                    let consumed = wind_candidate::effective_consumed(c, raw_input.len());
-                    max_by_text
-                        .entry(c.text.clone())
-                        .and_modify(|m| *m = (*m).max(consumed))
-                        .or_insert(consumed);
-                }
-            }
-            if !max_by_text.is_empty() {
-                candidates.retain(|c| {
-                    max_by_text.get(&c.text).is_none_or(|&max_c| {
-                        wind_candidate::effective_consumed(c, raw_input.len()) >= max_c
-                    })
-                });
-            }
-        }
 
         // 零权重读音让位：精确单字的**这个读音**词库权重为 0（𤭢 cei、塞 sei、嫩 nun、这 zhei）
         // ⇒ 并入简拼层按 weight 竞争（`Candidate::is_zero_weight_reading`）。双拼两键 `cw`
@@ -6132,7 +5960,7 @@ impl Engine for PinyinEngine {
         }
         if self.fuzzy_config.hint.get() || correction_on {
             self.fill_pinyin_hints(&mut sentence_pool, query, raw_input, sp_result.as_ref());
-            wind_candidate::drop_corrected_duplicates(&mut sentence_pool, raw_input.len());
+            wind_candidate::drop_corrected_duplicates(&mut sentence_pool);
         }
 
         Ok(ConvertResult {
@@ -6557,164 +6385,6 @@ mod tests {
             .with_fuzzy(correction_fuzzy());
         let r = eng.convert("gogn", 10).unwrap();
         assert!(r.candidates.iter().any(|c| c.text == "工"), "{r:?}");
-    }
-
-    fn yaml_dict_engine(tag: &str, entries: &[(&str, &str, i32)], fuzzy: FuzzyConfig) -> PinyinEngine {
-        use std::io::Write;
-        let path = std::env::temp_dir().join(format!("wind_corr_{tag}.dict.yaml"));
-        {
-            let mut f = std::fs::File::create(&path).unwrap();
-            writeln!(f, "---\nname: py\n...").unwrap();
-            for (text, code, w) in entries {
-                writeln!(f, "{text}\t{code}\t{w}").unwrap();
-            }
-        }
-        let dict = CachedDict::Memory(CodetableDict::load(&path).unwrap());
-        let _ = std::fs::remove_file(&path);
-        PinyinEngine::new(Config::default(), dict).with_fuzzy(fuzzy)
-    }
-
-    /// 非首音节纠错（`buyogn` → `*不用`，6 字节）不得被常规步骤的短前缀混合简拼回退
-    /// （`bu'y` → `不用`，3 字节）遮蔽，且引擎输出不留同文重复项。
-    #[test]
-    fn correction_longer_consumption_beats_shorter_abbrev_fallback() {
-        let mut cfg = wind_config::CorrectionConfig::default();
-        cfg.rules.gn_ng = false;
-        cfg.custom = vec!["ogn=ong".into()];
-        let fuzzy = FuzzyConfig {
-            correction: Arc::new(correction::CorrectionRules::from_config(&cfg)),
-            ..Default::default()
-        };
-        let eng = yaml_dict_engine(
-            "buyogn",
-            &[
-                ("不", "bu", 90000),
-                ("哟", "yo", 5000),
-                ("不哟", "bu yo", 1000),
-                ("不要", "bu yao", 60000),
-                ("不用", "bu yong", 50000),
-            ],
-            fuzzy,
-        );
-        let r = eng.convert("buyogn", 50).unwrap();
-        let buyong: Vec<&Candidate> = r.candidates.iter().filter(|c| c.text == "不用").collect();
-        assert_eq!(buyong.len(), 1, "引擎输出不应出现同文重复: {buyong:?}");
-        assert!(buyong[0].is_corrected, "应保留经纠错的整串候选: {:?}", buyong[0]);
-        assert_eq!(buyong[0].consumed_length, 6);
-        assert_eq!(buyong[0].meta.preedit_split.as_deref(), Some("bu'yogn"));
-
-        let mut ui = r.candidates;
-        wind_candidate::drop_corrected_duplicates(&mut ui, "buyogn".len());
-        ui.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, "buyogn"));
-        wind_candidate::protect_top_from_corrected(&mut ui, "buyogn".len());
-        assert_eq!(ui.first().map(|c| c.text.as_str()), Some("不用"));
-        assert!(ui[0].is_corrected);
-    }
-
-    /// 打字途中的同长度前缀补全（`buzhon` → `不中`，6 字节；`zho` 非合法音节，step 4 命中
-    /// 前缀补全）不得被同长度纠错版（`on→ong`）替换或降权。
-    #[test]
-    fn correction_does_not_override_same_length_prefix_completion() {
-        let cfg = wind_config::CorrectionConfig::default(); // 出厂 on_ong = true
-        let fuzzy = FuzzyConfig {
-            correction: Arc::new(correction::CorrectionRules::from_config(&cfg)),
-            ..Default::default()
-        };
-        let eng = yaml_dict_engine(
-            "buzhon_prefix",
-            &[("不", "bu", 90000), ("不中", "bu zhong", 50000)],
-            fuzzy,
-        );
-        let r = eng.convert("buzhon", 50).unwrap();
-        let buzhong = r
-            .candidates
-            .iter()
-            .find(|c| c.text == "不中")
-            .expect("应召回前缀补全「不中」");
-        assert!(!buzhong.is_corrected, "同长度前缀补全不应标纠错: {buzhong:?}");
-        assert!(!buzhong.is_fuzzy, "应保留原前缀补全而非纠错变体: {buzhong:?}");
-        assert!(buzhong.is_prefix, "应保留原前缀补全候选: {buzhong:?}");
-        assert_eq!(
-            buzhong.weight,
-            completion_penalized(50000, 1),
-            "权重不应被纠错惩罚打折"
-        );
-    }
-
-    /// 漏 `g`（`on_ong`）且末尾半截（`konglon` → `恐龙`）：D10 判定末尾 `lon` 对 `long` 为半截、
-    /// 不标 `is_corrected`，但编码栏切分仍须按纠错边界显示 `kong'lon`（而非主切分的 `kong'lo'n`），
-    /// 且截断后不留 5 字节 `kong'l` 的重复候选。
-    #[test]
-    fn correction_trailing_on_ong_splits_preedit_and_dedups() {
-        let cfg = wind_config::CorrectionConfig::default(); // 出厂 on_ong = true
-        let fuzzy = FuzzyConfig {
-            correction: Arc::new(correction::CorrectionRules::from_config(&cfg)),
-            ..Default::default()
-        };
-        let eng = yaml_dict_engine(
-            "konglon",
-            &[
-                ("空", "kong", 80000),
-                ("咯", "lo", 5000),
-                ("空咯", "kong lo", 1000),
-                ("恐龙", "kong long", 50000),
-            ],
-            fuzzy,
-        );
-        let r = eng.convert("konglon", 50).unwrap();
-        let konglong: Vec<&Candidate> = r.candidates.iter().filter(|c| c.text == "恐龙").collect();
-        assert_eq!(konglong.len(), 1, "不应出现重复候选: {konglong:?}");
-        assert_eq!(konglong[0].consumed_length, 7);
-        assert_eq!(
-            konglong[0].meta.preedit_split.as_deref(),
-            Some("kong'lon"),
-            "编码栏应按纠错边界切分，而非退回 kong'lo'n"
-        );
-
-        let mut ui = r.candidates;
-        wind_candidate::drop_corrected_duplicates(&mut ui, "konglon".len());
-        ui.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, "konglon"));
-        wind_candidate::protect_top_from_corrected(&mut ui, "konglon".len());
-        assert_eq!(ui.first().map(|c| c.text.as_str()), Some("恐龙"));
-    }
-
-    /// 纠错发生在首字且后接简拼/残码（`nonm` → `*农民`）：前段经纠错展开成 `nong` 后拼上 `m`
-    /// 走前缀补全，词组应消费全部 4 字节并排在单字「*农」（3 字节）之前，编码栏显示 `non'm`。
-    #[test]
-    fn correction_head_with_trailing_initial_recalls_phrase() {
-        let cfg = wind_config::CorrectionConfig::default(); // 出厂 on_ong = true
-        let fuzzy = FuzzyConfig {
-            correction: Arc::new(correction::CorrectionRules::from_config(&cfg)),
-            ..Default::default()
-        };
-        let eng = yaml_dict_engine(
-            "nonm",
-            &[
-                ("农", "nong", 80000),
-                ("农民", "nong min", 50000),
-                ("农民工", "nong min gong", 30000),
-            ],
-            fuzzy,
-        );
-        let r = eng.convert("nonm", 50).unwrap();
-        let nongmin = r
-            .candidates
-            .iter()
-            .find(|c| c.text == "农民")
-            .expect("`nonm` 应召回词组「农民」");
-        assert!(nongmin.is_corrected, "首音节经纠错应标 is_corrected: {nongmin:?}");
-        assert_eq!(nongmin.consumed_length, 4);
-        assert_eq!(nongmin.meta.preedit_split.as_deref(), Some("non'm"));
-        assert_eq!(
-            nongmin.meta.learn_code.as_ref().map(|(c, _)| c.as_str()),
-            Some("nongmin")
-        );
-
-        let mut ui = r.candidates;
-        wind_candidate::drop_corrected_duplicates(&mut ui, "nonm".len());
-        ui.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, "nonm"));
-        wind_candidate::protect_top_from_corrected(&mut ui, "nonm".len());
-        assert_eq!(ui.first().map(|c| c.text.as_str()), Some("农民"));
     }
 
     /// 双拼不启用换位纠错：两个 builder 谁先调都把纠错置空。
@@ -9082,7 +8752,7 @@ i = ["i"]
             ..Default::default()
         };
         let mut c = eng.convert_with_opts(input, 50, opts).unwrap().candidates;
-        wind_candidate::drop_corrected_duplicates(&mut c, input.len());
+        wind_candidate::drop_corrected_duplicates(&mut c);
         c.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, input));
         wind_candidate::protect_top_from_corrected(&mut c, input.len());
         let mut seen = std::collections::HashSet::new();

@@ -2767,10 +2767,7 @@ impl Coordinator {
                     history_recs,
                 );
                 // 纠错候选不占首选（D6）：同主路 helper，放在重排之后、shadow 之前。
-                wind_candidate::drop_corrected_duplicates(
-                    &mut member_cands,
-                    state.mix_buffer.len(),
-                );
+                wind_candidate::drop_corrected_duplicates(&mut member_cands);
                 wind_candidate::protect_top_from_corrected(
                     &mut member_cands,
                     state.mix_buffer.len(),

@@ -517,7 +517,7 @@ impl Coordinator {
         );
         // 纠错候选不占首选（D6）：本路不重排，与主路 / 临拼同一个 helper、同一位置
         // （全部重排之后、shadow 之前——用户置顶仍有最终话语权）。
-        wind_candidate::drop_corrected_duplicates(&mut list, state.special_buffer.len());
+        wind_candidate::drop_corrected_duplicates(&mut list);
         wind_candidate::protect_top_from_corrected(&mut list, state.special_buffer.len());
         self.run_passes(
             state,

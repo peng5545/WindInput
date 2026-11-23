@@ -441,7 +441,7 @@ impl Coordinator {
         // 供跨来源档位判「消费整串」与「码 == 输入」。缓冲恒 ASCII，字节长度与 `consumed_length` 同域。
         let input_str = state.temp_pinyin_buffer.clone();
         let mut candidates = result.candidates;
-        wind_candidate::drop_corrected_duplicates(&mut candidates, input_str.len());
+        wind_candidate::drop_corrected_duplicates(&mut candidates);
         // mixed=false：临拼是纯拼音 overlay，不存在码表/拼音跨来源竞争。
         candidates.sort_by(|a, b| {
             crate::handle_candidate::candidate_display_order(a, b, ignore_weight, false, &input_str)

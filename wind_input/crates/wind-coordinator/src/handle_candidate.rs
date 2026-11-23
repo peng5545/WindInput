@@ -2009,7 +2009,7 @@ impl Coordinator {
         // （见 `mark_common` 与 `wind_candidate::is_pinyin_exact_tier`）。过滤仍在下面按模式进行。
         self.mark_common(&mut candidates);
         // 同文的纠错候选让给非纠错那条（下面的去重留排序靠前者，纠错那条可能更靠前）。
-        wind_candidate::drop_corrected_duplicates(&mut candidates, input_str.len());
+        wind_candidate::drop_corrected_duplicates(&mut candidates);
         candidates.sort_by(|a, b| candidate_display_order(a, b, ignore_weight, mixed, &input_str));
         // 按 text 去重。**不能用 `retain` + `HashSet`**：被丢弃那条所占的码位要并进幸存者，
         // 否则下一步的检索范围过滤按 (source, code) 分组时会丢掉「该码位下有常用字」这一事实

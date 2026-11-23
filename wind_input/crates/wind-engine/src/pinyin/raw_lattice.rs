@@ -2807,7 +2807,7 @@ mod lambda_sweep {
     }
 
     fn ui_sort(c: &mut Vec<wind_candidate::Candidate>, input: &str) {
-        wind_candidate::drop_corrected_duplicates(c, input.len());
+        wind_candidate::drop_corrected_duplicates(c);
         c.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, input));
         wind_candidate::protect_top_from_corrected(c, input.len());
     }
