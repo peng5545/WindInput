@@ -1650,8 +1650,10 @@ pub struct Coordinator {
     /// 全仓的覆盖点都没有文件监视器。加载失败已在 `FormatTable::load` 内回落内置默认表，
     /// 此处恒是一张可用的表。
     pub(crate) quick_formats: wind_quick_input::FormatTable,
-    /// 软键盘映射表（出厂画布 ⊕ 用户按面覆盖）。启动后不变，与 `quick_formats` 同族。
-    pub(crate) softkeyboard: wind_softkeyboard::SoftKeyboardTable,
+    /// 软键盘映射表（出厂画布 ⊕ 用户按面覆盖）。设置端编辑器写完用户层后经
+    /// `reload_softkeyboard` 整表换新，故是 `RwLock<Arc<_>>`：读侧取一份 `Arc` 快照即放锁，
+    /// 按键路径上不会与重载互等。读用 [`Self::softkeyboard_table`]。
+    pub(crate) softkeyboard: std::sync::RwLock<Arc<wind_softkeyboard::SoftKeyboardTable>>,
     /// 软键盘面板开着。
     ///
     /// ★ **刻意不放 `State`**，虽然它看起来像一个输入状态。理由是死锁：状态推送
@@ -1696,8 +1698,9 @@ pub struct Coordinator {
     /// 换文档都不算「用户离开」（Excel 退出单元格再切到下一格就是这样），只有换了宿主才算。
     /// 与开启成对写入，见 `open_softkeyboard`。
     pub(crate) softkeyboard_host_pid: std::sync::atomic::AtomicU32,
-    /// 钉住：面板不随焦点变化自动关闭（跨应用也留着）。**只对本次打开有效**，任何一条
-    /// 关闭路径都复位（见 `close_softkeyboard`），不持久化——忘了钉的面板会一直挡在屏上。
+    /// 钉住：面板不随焦点变化自动关闭（跨应用也留着）。是**用户偏好**：关闭不复位，
+    /// 下次打开照旧钉着，跨重启经 `RuntimeState::softkeyboard_pinned` 还原。
+    /// 唯一的翻转入口是 `toggle_softkeyboard_pin`。
     pub(crate) softkeyboard_pinned: std::sync::atomic::AtomicBool,
     /// 快捷输入格式表的**用户调整**（右键调序 / 停用）运行时镜像，键为格式类别。
     ///
@@ -3009,59 +3012,8 @@ impl Coordinator {
         // 没有预检就没有任何线索（热路径不能每次按键都告警）。
         crate::quick_eval::precheck(&quick_formats);
 
-        // 软键盘映射表：出厂画布 ⊕ 定制层按面覆盖 ⊕ 用户层按面覆盖。
-        //
-        // ⚠️ 这里**不走** `resolve_data_file`：那个函数的语义是「靠前的层存在就整份取代
-        // 出厂」，而软键盘要的是按面合并——用户只想改一个键时不该失去其余 12 个面，
-        // 更不该在出厂新增面之后永远看不到它们（同 `system.quick.toml` 的用户设置分文件
-        // 那条理由）。故显式取各层路径，出厂铺底、逐层叠加。定制者由此也能只改几个面，
-        // 不必整份复制（同 `config.toml` 的四层深合并、`compat.toml` 的按条目合并）。
-        let softkeyboard = {
-            let layers = Config::resource_layers_named_with(data_dir);
-            // 出厂画布只认 data 层：缺了就回落内置兜底表（部署损坏时软键盘仍可用）。
-            // 定制层不接这个位置——它的语义是叠加，把它当画布会让「只改一个面」的定制包
-            // 丢掉出厂其余 12 个面，正是本段一开始就拒绝掉的那种整份取代。
-            let system = layers
-                .iter()
-                .find(|l| l.name == "data")
-                .map(|l| l.path.join(wind_softkeyboard::FILE_NAME));
-            let mut table = wind_softkeyboard::SoftKeyboardTable::load(system.as_deref());
-            // ⚠️ 层序方向：`resource_layers_named_with` 返回的是**优先级从高到低**的
-            // `[user, custom, data]`，而按面合并必须**从低到高**依次叠加（出厂铺底、
-            // 定制层次之、用户层最后）。故 `.rev()`。反过来叠的现象是
-            // 「用户改了一个键，定制版把它盖回去」。
-            for layer in layers.iter().rev().filter(|l| l.name != "data") {
-                let path = layer.path.join(wind_softkeyboard::FILE_NAME);
-                if !path.exists() {
-                    continue;
-                }
-                match std::fs::read_to_string(&path) {
-                    Ok(text) => match table.merge_user(&text) {
-                        Ok(()) => Config::log_layer_override(
-                            layer.name,
-                            "softkeyboard",
-                            wind_softkeyboard::FILE_NAME,
-                            &path,
-                            // 按面合并里每一层都真的生效（不是「谁赢了」），恒是覆盖。
-                            true,
-                        ),
-                        Err(e) => warn!(
-                            "软键盘: [{}]层覆盖解析失败，已忽略 {}: {}",
-                            layer.name,
-                            path.display(),
-                            e
-                        ),
-                    },
-                    Err(e) => warn!(
-                        "软键盘: [{}]层覆盖读取失败 {}: {}",
-                        layer.name,
-                        path.display(),
-                        e
-                    ),
-                }
-            }
-            table
-        };
+        // 软键盘映射表：出厂画布 ⊕ 定制层按面覆盖 ⊕ 用户层按面覆盖（分层理由见函数文档）。
+        let softkeyboard = crate::handle_softkeyboard::load_softkeyboard_table(data_dir, true);
 
         // 拼音读音表同样支持用户覆盖（整体替代）：改多音字取音、补生僻字读音都靠换这张表。
         let pinyin_map = Config::resolve_data_file(data_dir, "pinyin_map.txt");
@@ -3304,7 +3256,7 @@ impl Coordinator {
             emoji_spec: Mutex::new(None),
             aux_code_key_warned: std::sync::atomic::AtomicBool::new(false),
             quick_formats,
-            softkeyboard,
+            softkeyboard: std::sync::RwLock::new(Arc::new(softkeyboard)),
             softkeyboard_active: std::sync::atomic::AtomicBool::new(false),
             softkeyboard_page: std::sync::atomic::AtomicUsize::new(softkeyboard_page_init),
             softkeyboard_page_saved: std::sync::Mutex::new(
@@ -3315,7 +3267,9 @@ impl Coordinator {
             hotkey_session_force_push: std::sync::atomic::AtomicBool::new(false),
             softkeyboard_opened_at: std::sync::Mutex::new(None),
             softkeyboard_host_pid: std::sync::atomic::AtomicU32::new(0),
-            softkeyboard_pinned: std::sync::atomic::AtomicBool::new(false),
+            softkeyboard_pinned: std::sync::atomic::AtomicBool::new(
+                runtime_state.softkeyboard_pinned,
+            ),
             // 空初值：真正的装载在 new() 里经 `reload_quick_adjust` 完成（需要 store，
             // 而 store 在本结构体构造之后才可用）。headless 无 store 时保持空 = 出厂顺序。
             quick_adjust: std::sync::RwLock::new(std::collections::HashMap::new()),
@@ -8995,7 +8949,7 @@ impl Coordinator {
         // 不另存一份 atomic——多一份镜像就多一处会与切面动作漂移的状态。
         let soft_keyboard_keys = soft_keyboard
             && self
-                .softkeyboard
+                .softkeyboard_table()
                 .pages()
                 .get(self.softkeyboard_page_idx())
                 .is_some_and(|p| p.send_keys);
@@ -16626,6 +16580,35 @@ mod caret_compat_tests {
                  判据一旦回到「看位置」，这四组里必有一组绕过去"
             );
         }
+    }
+
+    /// 组合期间的普通 caret_update 与 probe 同源：该宿主的组合坐标恒不可信，
+    /// 首显用了空闲坐标后，这一帧不得把缓存换成陈旧值、也不得重锁候选窗。
+    #[test]
+    fn stale_probe_guard_host_ignores_caret_update_during_composition() {
+        let c = coord_with_idle_report();
+        c.handle_caret_update(&probe_at(473, 224, 35));
+        let st = c.state.lock().unwrap();
+        assert_eq!(
+            (st.caret_x, st.caret_y, st.caret_height),
+            (745, 1007, 20),
+            "组合期的 caret_update 不得覆盖组合前的空闲坐标"
+        );
+        assert!(
+            c.caret_cache_is_idle_report
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "空闲上报标记要保留，后续帧才继续被挡"
+        );
+    }
+
+    /// 没配守卫的宿主：组合期的 caret_update 照常采信（行为一字不差）。
+    #[test]
+    fn caret_update_during_composition_is_trusted_without_the_guard() {
+        let c = coord_with_idle_report();
+        c.active_compat.lock().unwrap().stale_probe_guard = false;
+        c.handle_caret_update(&probe_at(473, 224, 35));
+        let st = c.state.lock().unwrap();
+        assert_eq!((st.caret_x, st.caret_y), (473, 224));
     }
 
     /// 判据的前提是**手上有宿主刚报的空闲坐标**。没有它时缓存本身也是旧的，
